@@ -98,7 +98,7 @@ public class ChatSolverClient implements ClientModInitializer {
 
     static void info(String text) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.player != null) mc.player.displayClientMessage(Component.literal(text), false);
+                if (mc.player != null) mc.player.sendSystemMessage(Component.literal(text));
     }
 
     /** Word list is bundled inside the jar (common words first, so they win ties). */
