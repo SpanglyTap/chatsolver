@@ -160,17 +160,51 @@ public class ChatSolverClient implements ClientModInitializer {
             return sb.toString();
         }
 
+        static final Pattern TYPE_KEY = Pattern.compile("(?i)\\btype\\s+(?:the\\s+)?(?:word|words|phrase|text|number)\\b[:\\s]*(.*)$");
+
         String currentMessage = "";
+        long pendingAt = 0;
 
         String solve(String message) {
             currentMessage = message;
             String a;
+            String low = message.toLowerCase();
+            // ignore player chat (the server uses " » ") and win/result announcements
+            if (message.indexOf('»') >= 0) return null;
+            if (low.contains(" typed ") || low.contains("won the chat game") || low.contains("you won")) return null;
+            if ((a = typeTheWord(message)) != null) return a;
             if (message.indexOf('_') >= 0 && (a = fillGap(message)) != null) return caps(a);
             Matcher r = REVERSE_KEY.matcher(message);
             if (r.find()) { String p = payload(message, r.end()); if (p != null) return new StringBuilder(p).reverse().toString(); }
             Matcher s = SCRAMBLE_KEY.matcher(message);
             if (s.find()) { String p = payload(message, s.end()); if (p != null && (a = unscramble(p)) != null) return caps(a); }
             return math(message);
+        }
+
+        /** "Type the word" game: answer is the text shown, exactly as shown. The text may be on the next line or the next message. */
+        String typeTheWord(String message) {
+            String[] lines = message.split("\\R");
+            for (int i = 0; i < lines.length; i++) {
+                Matcher m = TYPE_KEY.matcher(lines[i].trim());
+                if (!m.find()) continue;
+                String ans = m.group(1).trim();
+                if (ans.isEmpty()) {
+                    for (int j = i + 1; j < lines.length && ans.isEmpty(); j++) ans = lines[j].trim();
+                }
+                if (!ans.isEmpty()) { pendingAt = 0; return ans; }
+                pendingAt = System.currentTimeMillis(); // answer should arrive in the next message
+                return null;
+            }
+            if (pendingAt > 0) {
+                long age = System.currentTimeMillis() - pendingAt;
+                String t = message.trim();
+                if (age < 3000 && !t.isEmpty() && !t.equalsIgnoreCase("chat game") && t.split("\\s+").length <= 6) {
+                    pendingAt = 0;
+                    return t;
+                }
+                if (age >= 3000) pendingAt = 0;
+            }
+            return null;
         }
 
         /** Text the game wants us to work on: after the last ':' or '>' following the keyword, else the last word. */
