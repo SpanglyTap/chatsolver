@@ -161,27 +161,84 @@ public class ChatSolverClient implements ClientModInitializer {
         }
 
         static final Pattern TYPE_KEY = Pattern.compile("(?i)\\btype\\s+(?:the\\s+)?(?:word|words|phrase|text|number)\\b[:\\s]*(.*)$");
+        static final Pattern RESULT_LINE = Pattern.compile("(?i)\\bin\\s+\\d+(?:\\.\\d+)?\\s*s\\b");
+        static final Set<String> FILLER = new HashSet<>(Arrays.asList(
+                "the", "this", "following", "letters", "letter", "words", "word", "text", "phrase", "below", "to", "a"));
 
         String currentMessage = "";
+        String pendingKind = null; // game started but the text to work on hasn't arrived yet
         long pendingAt = 0;
 
         String solve(String message) {
             currentMessage = message;
             String a;
             String low = message.toLowerCase();
-            // ignore player chat (the server uses " » ") and win/result announcements
+            long now = System.currentTimeMillis();
+            // ignore player chat (the server uses " » "), win/result announcements and headers
             if (message.indexOf('»') >= 0) return null;
-            if (low.contains(" typed ") || low.contains("won the chat game") || low.contains("you won")) return null;
-            if ((a = typeTheWord(message)) != null) return a;
-            if (message.indexOf('_') >= 0 && (a = fillGap(message)) != null) return caps(a);
+            if (low.contains(" typed ") || low.contains("won the chat game") || low.contains("you won")
+                    || RESULT_LINE.matcher(message).find()) return null;
+            if (message.trim().equalsIgnoreCase("chat game")) return null;
+
+            boolean hasType = false;
+            for (String ln : message.split("\\R")) if (TYPE_KEY.matcher(ln.trim()).find()) hasType = true;
             Matcher r = REVERSE_KEY.matcher(message);
-            if (r.find()) { String p = payload(message, r.end()); if (p != null) return new StringBuilder(p).reverse().toString(); }
-            Matcher s = SCRAMBLE_KEY.matcher(message);
-            if (s.find()) { String p = payload(message, s.end()); if (p != null && (a = unscramble(p)) != null) return caps(a); }
+            Matcher sc = SCRAMBLE_KEY.matcher(message);
+            boolean hasRev = r.find();
+            boolean hasScr = sc.find();
+
+            // the text for a game that was announced in the previous message
+            if (!hasType && !hasRev && !hasScr && pendingKind != null) {
+                long age = now - pendingAt;
+                String t = lastLine(message);
+                if (age < 3000 && !t.isEmpty() && t.split("\\s+").length <= 8) {
+                    String kind = pendingKind;
+                    pendingKind = null;
+                    t = clean(t);
+                    if (kind.equals("type")) return t;
+                    if (kind.equals("reverse")) return new StringBuilder(t).reverse().toString();
+                    String u = unscramble(t);
+                    return u == null ? null : caps(u);
+                }
+                if (age >= 3000) pendingKind = null;
+            }
+
+            if (hasType) {
+                a = typeTheWord(message);
+                if (a != null) { pendingKind = null; return a; }
+                pendingKind = "type"; pendingAt = now;
+                return null;
+            }
+            if (message.indexOf('_') >= 0 && (a = fillGap(message)) != null) return caps(a);
+            if (hasRev) {
+                String p = payload(message, r.end());
+                if (p != null) { pendingKind = null; return new StringBuilder(p).reverse().toString(); }
+                pendingKind = "reverse"; pendingAt = now;
+                return null;
+            }
+            if (hasScr) {
+                String p = payload(message, sc.end());
+                if (p != null) {
+                    pendingKind = null;
+                    return (a = unscramble(p)) != null ? caps(a) : null;
+                }
+                pendingKind = "scramble"; pendingAt = now;
+                return null;
+            }
             return math(message);
         }
 
-        /** "Type the word" game: answer is the text shown, exactly as shown. The text may be on the next line or the next message. */
+        static String lastLine(String msg) {
+            String last = "";
+            for (String ln : msg.split("\\R")) if (!ln.trim().isEmpty()) last = ln.trim();
+            return last;
+        }
+
+        static String clean(String p) {
+            return p.trim().replaceAll("^[\"'`*\\[(<]+|[\"'`*\\])>!?.,]+$", "").trim();
+        }
+
+        /** "Type the word" game: answer is the text shown, exactly as shown (same line or the next line). */
         String typeTheWord(String message) {
             String[] lines = message.split("\\R");
             for (int i = 0; i < lines.length; i++) {
@@ -191,34 +248,32 @@ public class ChatSolverClient implements ClientModInitializer {
                 if (ans.isEmpty()) {
                     for (int j = i + 1; j < lines.length && ans.isEmpty(); j++) ans = lines[j].trim();
                 }
-                if (!ans.isEmpty()) { pendingAt = 0; return ans; }
-                pendingAt = System.currentTimeMillis(); // answer should arrive in the next message
-                return null;
-            }
-            if (pendingAt > 0) {
-                long age = System.currentTimeMillis() - pendingAt;
-                String t = message.trim();
-                if (age < 3000 && !t.isEmpty() && !t.equalsIgnoreCase("chat game") && t.split("\\s+").length <= 6) {
-                    pendingAt = 0;
-                    return t;
-                }
-                if (age >= 3000) pendingAt = 0;
+                return ans.isEmpty() ? null : ans;
             }
             return null;
         }
 
-        /** Text the game wants us to work on: after the last ':' or '>' following the keyword, else the last word. */
+        /** The text to work on after the keyword: the last line below it, else after ':' or '>', else the rest of the line. */
         static String payload(String msg, int from) {
             String rest = msg.substring(from);
-            int c = Math.max(rest.lastIndexOf(':'), Math.max(rest.lastIndexOf('>'), rest.lastIndexOf('»')));
+            String[] lines = rest.split("\\R");
+            String last = "";
+            for (int i = 1; i < lines.length; i++) if (!lines[i].trim().isEmpty()) last = lines[i].trim();
             String p;
-            if (c >= 0) p = rest.substring(c + 1);
+            if (!last.isEmpty()) p = last;
             else {
-                String[] w = rest.trim().split("\\s+");
-                if (msg.trim().split("\\s+").length > 8) return null; // long sentence = probably normal chat
-                p = w.length == 0 ? "" : w[w.length - 1];
+                String first = lines.length > 0 ? lines[0] : "";
+                int c = Math.max(first.lastIndexOf(':'), first.lastIndexOf('>'));
+                if (c >= 0) p = first.substring(c + 1);
+                else {
+                    String[] w = first.trim().split("\\s+");
+                    int k = 0;
+                    while (k < w.length && FILLER.contains(w[k].toLowerCase().replaceAll("[^a-z]", ""))) k++;
+                    if (w.length - k > 4) return null; // too long: probably normal chat
+                    p = String.join(" ", Arrays.copyOfRange(w, k, w.length));
+                }
             }
-            p = p.trim().replaceAll("^[\"'`*\\[(<]+|[\"'`*\\])>!?.,]+$", "").trim();
+            p = clean(p);
             return p.isEmpty() ? null : p;
         }
 
